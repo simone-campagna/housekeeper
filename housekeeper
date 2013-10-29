@@ -18,6 +18,7 @@
 __author__ = "Simone Campagna"
 
 import os
+import sys
 import glob
 import time
 import shutil
@@ -25,6 +26,7 @@ import logging
 import argparse
 import calendar
 import datetime
+import configparser
 
 class Ask(object):
     def __init__(self, answer='x'):
@@ -207,14 +209,113 @@ DEFAULT_MODE = MODE_INTERACTIVE
 
 DEFAULT_TIME_ATTRIBUTE = "st_mtime"
 
+
+TIME_ATTRIBUTE = DEFAULT_TIME_ATTRIBUTE
+MODE = DEFAULT_MODE
+DRY_RUN = False
+
+def apply_patterns(logger, ref_date, *patterns):
+    for pattern in patterns:
+        for entry in glob.glob(pattern):
+            entry_stat = os.stat(entry)
+            entry_seconds = getattr(entry_stat, TIME_ATTRIBUTE)
+            entry_date = datetime.datetime(*time.localtime(entry_seconds)[:6])
+            entry_type = None
+            entry_remover = None
+            if os.path.isdir(entry):
+                # dir
+                entry_type = 'directory'
+                entry_remover = remove_dir
+            elif os.path.islink(entry):
+                # link
+                entry_type = 'symbolic link'
+                entry_remover = remove_link
+            elif os.path.isfile(entry):
+                # file
+                entry_type = 'file'
+                entry_remover = remove_file
+            else:
+                logger.warning("skipping unmanaged entry {}".format(entry))
+                continue
+            logger.debug("{} {}, {}={}, ref_time={}".format(entry_type, entry, TIME_ATTRIBUTE, entry_date, ref_date))
+            if entry_date < ref_date:
+                if must_remove("{} {}".format(entry_type, entry), MODE):
+                    entry_remover(entry, logger, DRY_RUN)
+            else:
+                logger.debug("skipping young {} {}".format(entry_type, entry))
+
 def main():
+    common_parser = argparse.ArgumentParser(add_help=False)
 
-    parser = argparse.ArgumentParser()
+    common_parser.add_argument("--verbose", "-v",
+        action="store_true",
+        default=False,
+        help="verbose mode")
 
+    common_parser.add_argument("--debug", "-d",
+        action="store_true",
+        default=False,
+        help="debug mode")
 
-    parser.add_argument("patterns",
-        nargs='+',
-        help="patterns")
+    common_parser.add_argument("--dry-run",
+        action="store_true",
+        default=False,
+        help="dry run (do not delete)")
+
+    time_group = common_parser.add_mutually_exclusive_group(required=False)
+
+    time_group.add_argument("--ctime",
+        dest="st_time_attribute",
+        action="store_const",
+        const="st_ctime",
+        default=DEFAULT_TIME_ATTRIBUTE,
+        help="use inode change time")
+   
+    time_group.add_argument("--mtime",
+        dest="st_time_attribute",
+        action="store_const",
+        const="st_mtime",
+        default=DEFAULT_TIME_ATTRIBUTE,
+        help="use file modification time")
+   
+    time_group.add_argument("--atime",
+        dest="st_time_attribute",
+        action="store_const",
+        const="st_atime",
+        default=DEFAULT_TIME_ATTRIBUTE,
+        help="use file access time")
+   
+    mode_group = common_parser.add_mutually_exclusive_group(required=False)
+
+    mode_group.add_argument("--interactive", "-i",
+        dest="mode",
+        action="store_const",
+        const=MODE_INTERACTIVE,
+        default=DEFAULT_MODE,
+        help="interactive (ask before deleting)")
+
+    mode_group.add_argument("--force", "-f",
+        dest="mode",
+        action="store_const",
+        const=MODE_FORCE,
+        default=DEFAULT_MODE,
+        help="force (delete files without asking)")
+
+    parser = argparse.ArgumentParser(parents=[common_parser])
+
+    input_group = parser.add_mutually_exclusive_group()
+
+    input_group.add_argument("--config", "-c", 
+        type=str,
+        metavar="C",
+        default=None,
+        help="config filename")
+
+    input_group.add_argument("--pattern", "-p",
+        dest="patterns",
+        action="append",
+        default=[],
+        help="add pattern")
 
     date_group = parser.add_mutually_exclusive_group(required=True)
 
@@ -266,60 +367,6 @@ def main():
         type=_date,
         help="remove files older than reference date RD")
 
-    parser.add_argument("--verbose", "-v",
-        action="store_true",
-        default=False,
-        help="verbose mode")
-
-    parser.add_argument("--debug", "-d",
-        action="store_true",
-        default=False,
-        help="debug mode")
-
-    parser.add_argument("--dry-run",
-        action="store_true",
-        default=False,
-        help="dry run (do not delete)")
-
-    mode_group = parser.add_mutually_exclusive_group(required=False)
-
-    mode_group.add_argument("--interactive",
-        dest="mode",
-        action="store_const",
-        const=MODE_INTERACTIVE,
-        default=DEFAULT_MODE,
-        help="interactive (ask before deleting)")
-
-    mode_group.add_argument("--force",
-        dest="mode",
-        action="store_const",
-        const=MODE_FORCE,
-        default=DEFAULT_MODE,
-        help="force (delete files without asking)")
-
-    time_group = parser.add_mutually_exclusive_group(required=False)
-
-    time_group.add_argument("--ctime",
-        dest="st_time_attribute",
-        action="store_const",
-        const="st_ctime",
-        default=DEFAULT_TIME_ATTRIBUTE,
-        help="use inode change time")
-   
-    time_group.add_argument("--mtime",
-        dest="st_time_attribute",
-        action="store_const",
-        const="st_mtime",
-        default=DEFAULT_TIME_ATTRIBUTE,
-        help="use file modification time")
-   
-    time_group.add_argument("--atime",
-        dest="st_time_attribute",
-        action="store_const",
-        const="st_atime",
-        default=DEFAULT_TIME_ATTRIBUTE,
-        help="use file access time")
-   
     args = parser.parse_args()
 
     logger = logging.getLogger("CLEAN_DIRS")
@@ -335,34 +382,28 @@ def main():
     logger.setLevel(log_level)
     handler.setLevel(log_level)
 
-    for pattern in args.patterns:
-        for entry in glob.glob(pattern):
-            entry_stat = os.stat(entry)
-            entry_seconds = getattr(entry_stat, args.st_time_attribute)
-            entry_date = datetime.datetime(*time.localtime(entry_seconds)[:6])
-            entry_type = None
-            entry_remover = None
-            if os.path.isdir(entry):
-                # dir
-                entry_type = 'directory'
-                entry_remover = remove_dir
-            elif os.path.islink(entry):
-                # link
-                entry_type = 'symbolic link'
-                entry_remover = remove_link
-            elif os.path.isfile(entry):
-                # file
-                entry_type = 'file'
-                entry_remover = remove_file
-            else:
-                logger.warning("skipping unmanaged entry {}".format(entry))
-                continue
-            logger.debug("{} {}, {}={}, ref_time={}".format(entry_type, entry, args.st_time_attribute, entry_date, args.ref_date))
-            if entry_date < args.ref_date:
-                if must_remove("{} {}".format(entry_type, entry), args.mode):
-                    entry_remover(entry, logger, args.dry_run)
-            else:
-                logger.debug("skipping young {} {}".format(entry_type, entry))
+    global TIME_ATTRIBUTE
+    TIME_ATTRIBUTE = args.st_time_attribute
+
+    global MODE
+    MODE = args.mode
+
+    global DRY_RUN
+    DRY_RUN = args.dry_run
+
+    if args.config:
+        config = configparser.ConfigParser()
+        config.read(args.config)
+        for key, val in config.items():
+            print(key, repr(val), type(val))
+        print(config)
+
+    elif args.patterns:
+        if args.ref_date is None:
+            logger.error("ERR: reference date not specified")
+            sys.exit(1)
+        apply_patterns(logger, args.ref_date, *args.patterns)
+
 
 if __name__ == "__main__":
     main()
