@@ -173,6 +173,7 @@ class HouseKeeper(object):
             self._unit_dict[unit] = unit
             for alias in aliases:
                 self._unit_dict[alias] = unit
+        unit_aliases.sort(key=lambda x: len(x), reverse=True)
         #print('([+-]?[1-9]\d+|[+-]?0)\s*({})'.format('|'.join(unit_aliases)))
         self._re_token = re.compile('([+-]?[1-9]\d*|[+-]?0)\s*({})'.format('|'.join(unit_aliases)))
 
@@ -233,7 +234,6 @@ class HouseKeeper(object):
             if entry in self._visited:
                 self.logger.debug("skipping aleady visited entry {}".format(entry))
                 continue
-            self._visited.add(entry)
             entry_stat = os.stat(entry)
             entry_seconds = getattr(entry_stat, self.time_attribute)
             entry_date = datetime.datetime(*time.localtime(entry_seconds)[:6])
@@ -264,6 +264,7 @@ class HouseKeeper(object):
             if not must_remove:
                 self.logger.debug("skipping {} {}".format(entry_type, entry))
                 continue
+            self._visited.add(entry)
             self.logger.debug("{} {}, {}={!r}, ref_time={!r}".format(entry_type, entry, self.time_attribute, entry_date.strftime(self.TIME_FORMAT), ref_date.strftime(self.TIME_FORMAT)))
             if entry_date < ref_date:
                 if self.must_remove("{} {}".format(entry_type, entry), self.mode):
@@ -300,6 +301,27 @@ class HouseKeeper(object):
             self.logger.info("removing file {}".format(entry))
             os.remove(entry)
             
+class HKConfig(configparser.ConfigParser):
+    def __init__(self):
+        super().__init__()
+        self['DEFAULT'] = {
+            'ref_date': '',
+            'remove_dirs': 'True',
+            'remove_links': 'True',
+            'remove_files': 'True',
+        }
+
+def _bool(bool_string):
+    if bool_string == "True":
+        return True
+    elif bool_string == "False":
+        return False
+    else:
+        try:
+            i = int(bool_string)
+            return bool(i)
+        except ValueError:
+            raise ValueError("invalid boolean value {!r}".format(bool_string))
 def main():
     common_parser = argparse.ArgumentParser(add_help=False)
 
@@ -421,18 +443,28 @@ def main():
     logger.setLevel(log_level)
     handler.setLevel(log_level)
 
-    housekeeper = HouseKeeper(logger=logger, dry_run=args.dry_run, mode=args.mode, time_attribute=args.st_time_attribute)
-    if args.config:
-        config = configparser.ConfigParser()
-        config.read(args.config)
-        for key, val in config.items():
-            print(key, repr(val), type(val))
-        print(config)
-    elif args.patterns:
-        for pattern, ref_date in args.patterns:
-            housekeeper.clean(pattern, ref_date, remove_dirs=args.remove_dirs, remove_links=args.remove_links, remove_files=args.remove_files)
-            #apply_patterns(logger, args.ref_date, *args.patterns)
-
+    try:
+        pl = []
+        if args.config:
+            config = HKConfig()
+            config.read(args.config)
+            for pattern, pattern_data in config.items():
+                ref_date = pattern_data['ref_date']
+                remove_dirs = _bool(pattern_data['remove_dirs'])
+                remove_links = _bool(pattern_data['remove_links'])
+                remove_files = _bool(pattern_data['remove_files'])
+                pl.append((pattern, ref_date, remove_dirs, remove_links, remove_files))
+        if args.patterns:
+            for pattern, ref_date in args.patterns:
+                pl.append((pattern, ref_date, args.remove_dirs, args.remove_links, args.remove_files))
+                #apply_patterns(logger, args.ref_date, *args.patterns)
+    
+        housekeeper = HouseKeeper(logger=logger, dry_run=args.dry_run, mode=args.mode, time_attribute=args.st_time_attribute)
+        for pattern, ref_date, remove_dirs, remove_links, remove_files in pl:
+            housekeeper.clean(pattern, ref_date, remove_dirs=remove_dirs, remove_links=remove_links, remove_files=remove_files)
+    except Exception as e:
+        logger.critical("ERR: {}: {}".format(e.__class__.__name__, e))
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
