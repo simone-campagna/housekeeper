@@ -123,7 +123,7 @@ class TDelta(object):
             day += 1
             hour -= 24
         year, month = self._norm_month(year, month)
-        while day < 0:
+        while day < 1:
             month -= 1
             year, month = self._norm_month(year, month - 1)
             month_days = calendar.monthrange(year, month)[1]
@@ -131,13 +131,34 @@ class TDelta(object):
         year, month = self._norm_month(year, month)
         while True:
             month_days = calendar.monthrange(year, month)[1]
-            if day < month_days:
+            if day <= month_days:
                 break
             year, month = self._norm_month(year, month + 1)
             day -= month_days
+        #print(year, month, day, hour, minute, second)
         return datetime.datetime(year, month, day, hour, minute, second)
       
+class EntryList(set):
+    def __init__(self, list_file, list_dir=None):
+        self.list_file = os.path.abspath(list_file)
+        if list_dir is None:
+            list_dir = os.path.dirname(self.list_file)
+        super().__init__()
+        with open(self.list_file, "r") as f_in:
+            for line in f_in:
+                entry = line.strip()
+                if not os.path.isabs(entry):
+                      entry = os.path.join(list_dir, entry)
+                for p_entry in glob.glob(entry):
+                    p_entry = os.path.normpath(p_entry)
+                    #print("*** {!r} -> {!r}".format(entry, p_entry))
+                    self.add(p_entry)
 
+    def __str__(self):
+        return repr(self)
+
+    def __repr__(self):
+        return "{}(list_file={!r}, {})".format(self.__class__.__name__, self.list_file, super().__repr__())
 class HouseKeeper(object):
     MODE_INTERACTIVE = 'interactive'
     MODE_FORCE = 'force'
@@ -157,6 +178,7 @@ class HouseKeeper(object):
         'second': ('s', 'seconds'),
     }
     NOW = datetime.datetime.now()
+    HOUSEKEEPER_LIST = ".housekeeper.list"
     def __init__(self, logger, *, mode=DEFAULT_MODE, dry_run=False, time_attribute):
         self.logger = logger
         self.mode = mode
@@ -176,6 +198,7 @@ class HouseKeeper(object):
         unit_aliases.sort(key=lambda x: len(x), reverse=True)
         #print('([+-]?[1-9]\d+|[+-]?0)\s*({})'.format('|'.join(unit_aliases)))
         self._re_token = re.compile('([+-]?[1-9]\d*|[+-]?0)\s*({})'.format('|'.join(unit_aliases)))
+        self._list_dirs = {}
 
     def _make_datetime(self, ref_date_s):
         # absolute datetime
@@ -240,12 +263,14 @@ class HouseKeeper(object):
             entry_type = None
             entry_remover = None
             must_remove = True
+            list_dirs = []
             if os.path.isdir(entry):
                 # dir
                 entry_type = 'directory'
                 entry_remover = self.remove_dir
                 if not remove_dirs:
                     must_remove = False
+                list_dirs.append(entry)
             elif os.path.islink(entry):
                 # link
                 entry_type = 'symbolic link'
@@ -261,10 +286,31 @@ class HouseKeeper(object):
             else:
                 self.logger.warning("skipping unmanaged entry {}".format(entry))
                 continue
+            self._visited.add(entry)
+            list_dirs.append(os.path.dirname(entry))
             if not must_remove:
                 self.logger.debug("skipping {} {}".format(entry_type, entry))
                 continue
-            self._visited.add(entry)
+            entry_list = None
+            for list_dir in list_dirs:
+                if list_dir in self._list_dirs:
+                    entry_list = self._list_dirs[list_dir]
+                else:
+                    list_file = os.path.join(list_dir, self.HOUSEKEEPER_LIST)
+                    if os.path.exists(list_file):
+                        self.logger.debug("reading config file {}".format(list_file))
+                        entry_list = EntryList(list_dir=list_dir, list_file=list_file)
+                        self._list_dirs[list_dir] = entry_list
+                    else:
+                        self._list_dirs[list_dir] = None
+                if entry_list is not None:
+                    break
+            if entry_list is not None:
+                #print(entry_list)
+                if entry in entry_list:
+                    must_remove = False    
+                    self.logger.debug("skipping {} {} (see {})".format(entry_type, entry, entry_list.list_file))
+                    continue
             self.logger.debug("{} {}, {}={!r}, ref_time={!r}".format(entry_type, entry, self.time_attribute, entry_date.strftime(self.TIME_FORMAT), ref_date.strftime(self.TIME_FORMAT)))
             if entry_date < ref_date:
                 if self.must_remove("{} {}".format(entry_type, entry), self.mode):
@@ -301,7 +347,7 @@ class HouseKeeper(object):
             self.logger.info("removing file {}".format(entry))
             os.remove(entry)
             
-class HKConfig(configparser.ConfigParser):
+class HouseKeeperConfig(configparser.ConfigParser):
     def __init__(self):
         super().__init__()
         self['DEFAULT'] = {
@@ -446,7 +492,7 @@ def main():
     try:
         pl = []
         if args.config:
-            config = HKConfig()
+            config = HouseKeeperConfig()
             config.read(args.config)
             for pattern, pattern_data in config.items():
                 if not os.path.isabs(pattern):
@@ -465,6 +511,9 @@ def main():
         for pattern, ref_date, remove_dirs, remove_links, remove_files in pl:
             housekeeper.clean(pattern, ref_date, remove_dirs=remove_dirs, remove_links=remove_links, remove_files=remove_files)
     except Exception as e:
+        if args.debug:
+            import traceback
+            traceback.print_exc()
         logger.critical("ERR: {}: {}".format(e.__class__.__name__, e))
         sys.exit(1)
 
