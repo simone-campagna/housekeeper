@@ -46,11 +46,9 @@ class Ask(object):
         else:
             return False
 
-ASK_CLEAN = Ask()
 
-_NOW = datetime.datetime.now()
 
-class _TDelta(object):
+class TDelta(object):
     def __init__(self, year=0, month=0, day=0, hour=0, minute=0, second=0):
         self.year = year
         self.month = month
@@ -88,12 +86,12 @@ class _TDelta(object):
     def __rsub__(self, dt):
         assert isinstance(dt, datetime.datetime)
         return self._make_datetime(
-            year=self.year - dt.year, 
-            month=self.month - dt.month, 
-            day=self.day - dt.day, 
-            hour=self.hour - dt.hour, 
-            minute=self.minute - dt.minute, 
-            second=self.second - dt.second, 
+            year=dt.year - self.year,
+            month=dt.month - self.month,
+            day=dt.day - self.day,
+            hour=dt.hour - self.hour,
+            minute=dt.minute - self.minute,
+            second=dt.second - self.second,
         )
 
     def _norm_month(self, year, month):
@@ -140,114 +138,15 @@ class _TDelta(object):
         return datetime.datetime(year, month, day, hour, minute, second)
       
 
-def _ago(*, year=0, month=0, day=0, hour=0, minute=0, second=0):
-    return datetime.datetime(_NOW.year - year, _NOW.month - month, _NOW.day - day, _NOW.hour - hour, _NOW.minute - minute, _NOW.second - second)
-
-def _years_ago(s):
-    return _ago(year=int(s))
-
-def _months_ago(s):
-    return _ago(month=int(s))
-
-def _weeks_ago(s):
-    return _ago(day=7 * int(s))
-
-def _days_ago(s):
-    return _ago(day=int(s))
-
-def _hours_ago(s):
-    return _ago(hour=int(s))
-
-def _minutes_ago(s):
-    return _ago(minute=int(s))
-
-def _seconds_ago(s):
-    return _ago(second=int(s))
-
-def _date(s):
-    formats = ("%Y%m%d %H:%M:%S", "%Y%m%d")
-    for fmt in formats:
-        try:
-            return datetime.datetime.strptime(s, fmt)
-        except ValueError:
-            pass
-    raise ValueError("invalid value {}: not a date")
-
-def must_remove(message, mode):
-    if mode == MODE_INTERACTIVE:
-        return ASK_CLEAN.ask("remove {}".format(message))
-    elif mode == MODE_FORCE:
-        return True
-    else:
-        assert False
-
-def remove_dir(entry, logger, dry_run):
-    if dry_run:
-        logger.warning("DRY-RUN> removing directory {}".format(entry))
-    else:
-        logger.info("removing directory {}".format(entry))
-        shutil.rmtree(entry, ignore_errors=True)
-
-def remove_link(entry, logger, dry_run):
-    if dry_run:
-        logger.warning("DRY-RUN> removing symbolic link {}".format(entry))
-    else:
-        logger.info("removing symbolic link {}".format(entry))
-        os.remove(entry)
-
-def remove_file(entry, logger, dry_run):
-    if dry_run:
-        logger.warning("DRY-RUN> removing file {}".format(entry))
-    else:
-        logger.info("removing file {}".format(entry))
-        os.remove(entry)
-
-MODE_INTERACTIVE = 'interactive'
-MODE_FORCE = 'force'
-MODES = (MODE_FORCE, MODE_INTERACTIVE)
-
-DEFAULT_MODE = MODE_INTERACTIVE
-
-DEFAULT_TIME_ATTRIBUTE = "st_mtime"
-
-
-TIME_ATTRIBUTE = DEFAULT_TIME_ATTRIBUTE
-MODE = DEFAULT_MODE
-DRY_RUN = False
-
-def apply_patterns(logger, ref_date, *patterns):
-    for pattern in patterns:
-        for entry in glob.glob(pattern):
-            entry_stat = os.stat(entry)
-            entry_seconds = getattr(entry_stat, TIME_ATTRIBUTE)
-            entry_date = datetime.datetime(*time.localtime(entry_seconds)[:6])
-            entry_type = None
-            entry_remover = None
-            if os.path.isdir(entry):
-                # dir
-                entry_type = 'directory'
-                entry_remover = remove_dir
-            elif os.path.islink(entry):
-                # link
-                entry_type = 'symbolic link'
-                entry_remover = remove_link
-            elif os.path.isfile(entry):
-                # file
-                entry_type = 'file'
-                entry_remover = remove_file
-            else:
-                logger.warning("skipping unmanaged entry {}".format(entry))
-                continue
-            logger.debug("{} {}, {}={}, ref_time={}".format(entry_type, entry, TIME_ATTRIBUTE, entry_date, ref_date))
-            if entry_date < ref_date:
-                if must_remove("{} {}".format(entry_type, entry), MODE):
-                    entry_remover(entry, logger, DRY_RUN)
-            else:
-                logger.debug("skipping young {} {}".format(entry_type, entry))
-
 class HouseKeeper(object):
-    TIME_FORMATS = ("%Y%m%d %H:%M:%S", "%Y%m%d")
-    RE_SEP = re.compile('[:,\s]*')
+    MODE_INTERACTIVE = 'interactive'
+    MODE_FORCE = 'force'
+    MODES = (MODE_FORCE, MODE_INTERACTIVE)
+    DEFAULT_MODE = MODE_INTERACTIVE
+    DEFAULT_TIME_ATTRIBUTE = "st_mtime"
+
+    TIME_FORMAT = "%Y%m%d %H:%M:%S"
+    TIME_FORMATS = (TIME_FORMAT, "%Y%m%d")
     UNIT_ALIASES = {
         'year': ('Y', 'y', 'years'),
         'month': ('M', 'months'),
@@ -257,17 +156,29 @@ class HouseKeeper(object):
         'minute': ('m', 'minutes'),
         'second': ('s', 'seconds'),
     }
-    RE_TOKEN = re.compile('(\d+)\s*(Y|year|years|M|month|months|W|w|week|weeks|D|d|day|days|m|minute|minutes|s|second|seconds)')
-    def __init__(self, logger, *, mode=MODE_INTERACTIVE, dry_run=False):
+    NOW = datetime.datetime.now()
+    def __init__(self, logger, *, mode=DEFAULT_MODE, dry_run=False, time_attribute):
         self.logger = logger
         self.mode = mode
         self.dry_run = dry_run
+        self.time_attribute = time_attribute
+        self.ask_clean = Ask()
         self._visited = set()
+        self._re_sep = re.compile('[:,\s]*')
+        unit_aliases = []
+        self._unit_dict = {}
+        for unit, aliases in self.UNIT_ALIASES.items():
+            unit_aliases.append(unit)
+            unit_aliases.extend(aliases)
+            self._unit_dict[unit] = unit
+            for alias in aliases:
+                self._unit_dict[alias] = unit
+        #print('([+-]?[1-9]\d+|[+-]?0)\s*({})'.format('|'.join(unit_aliases)))
+        self._re_token = re.compile('([+-]?[1-9]\d*|[+-]?0)\s*({})'.format('|'.join(unit_aliases)))
 
-    @classmethod
-    def _make_datetime(cls, ref_date_s):
+    def _make_datetime(self, ref_date_s):
         # absolute datetime
-        for fmt in cls.TIME_FORMATS:
+        for fmt in self.TIME_FORMATS:
             try:
                 return datetime.datetime.strptime(ref_date_s, fmt)
             except ValueError:
@@ -275,26 +186,120 @@ class HouseKeeper(object):
         # relative datetime
         s = ref_date_s
         tokens = []
-        while True:
-            m_sep = cls.RE_SEP.match(s)
+        offset = 0
+        while s:
+            m_sep = self._re_sep.match(s)
+            #print("sep: <{}> -> {}".format(s, m_sep))
             if m_sep:
                 b, e = m_sep.span()
-                s = s[e + 1:]
-            m_token = cls.RE_TOKEN.match(s)
+                s = s[e:]
+                offset += e
+            m_token = self._re_token.match(s)
+            #print("token: <{}> -> {}".format(s, m_token))
             if m_token:
                 b, e = m_token.span()
-                s = s[e + 1:]
+                s = s[e:]
+                offset += e
                 tokens.append(m_token.groups())
-        for m in cls.RE_SPLIT.finditer(ref_date_s):
-            num, unit = m.groups()
-            if
-        return None
+            else:
+                raise ValueError("invalid ref_date {!r}: unparsed token {!r}".format(ref_date_s, ref_date_s[offset:]))
+        tdelta = TDelta()
+        for num, unit in tokens:
+            num = int(num)
+            unit = self._unit_dict[unit]
+            if unit == 'year':
+                tdelta.year += num
+            elif unit == 'month':
+                tdelta.month += num
+            elif unit == 'week':
+                tdelta.week += num
+            elif unit == 'day':
+                tdelta.day += num
+            elif unit == 'hour':
+                tdelta.hour += num
+            elif unit == 'minute':
+                tdelta.minute += num
+            elif unit == 'second':
+                tdelta.second += num
+            else:
+                raise ValueError("invalid unit {}".format(unit))
+        return self.NOW - tdelta
 
-    def clean(self, pattern, ref_date):
-        if isinstance(ref_date, str):
- 
-            raise ValueError("invalid value {}: not a date")
+    def clean(self, pattern, ref_date, *, remove_dirs=True, remove_links=True, remove_files=True):
+        if not isinstance(ref_date, datetime.datetime):
+            ref_date = self._make_datetime(ref_date)
+        for entry in glob.glob(pattern):
+            entry = os.path.normpath(os.path.abspath(entry))
+            if entry in self._visited:
+                self.logger.debug("skipping aleady visited entry {}".format(entry))
+                continue
+            self._visited.add(entry)
+            entry_stat = os.stat(entry)
+            entry_seconds = getattr(entry_stat, self.time_attribute)
+            entry_date = datetime.datetime(*time.localtime(entry_seconds)[:6])
+            entry_type = None
+            entry_remover = None
+            must_remove = True
+            if os.path.isdir(entry):
+                # dir
+                entry_type = 'directory'
+                entry_remover = self.remove_dir
+                if not remove_dirs:
+                    must_remove = False
+            elif os.path.islink(entry):
+                # link
+                entry_type = 'symbolic link'
+                entry_remover = self.remove_link
+                if not remove_links:
+                    must_remove = False
+            elif os.path.isfile(entry):
+                # file
+                entry_type = 'file'
+                entry_remover = self.remove_file
+                if not remove_files:
+                    must_remove = False
+            else:
+                self.logger.warning("skipping unmanaged entry {}".format(entry))
+                continue
+            if not must_remove:
+                self.logger.debug("skipping {} {}".format(entry_type, entry))
+                continue
+            self.logger.debug("{} {}, {}={!r}, ref_time={!r}".format(entry_type, entry, self.time_attribute, entry_date.strftime(self.TIME_FORMAT), ref_date.strftime(self.TIME_FORMAT)))
+            if entry_date < ref_date:
+                if self.must_remove("{} {}".format(entry_type, entry), self.mode):
+                    entry_remover(entry)
+            else:
+                self.logger.debug("skipping young {} {}".format(entry_type, entry))
+        
+    def must_remove(self, message, mode):
+        if mode == self.MODE_INTERACTIVE:
+            return self.ask_clean.ask("remove {}".format(message))
+        elif mode == self.MODE_FORCE:
+            return True
+        else:
+            assert False
 
+    def remove_dir(self, entry):
+        if self.dry_run:
+            self.logger.warning("DRY-RUN> removing directory {}".format(entry))
+        else:
+            self.logger.info("removing directory {}".format(entry))
+            shutil.rmtree(entry, ignore_errors=True)
+
+    def remove_link(self, entry):
+        if self.dry_run:
+            self.logger.warning("DRY-RUN> removing symbolic link {}".format(entry))
+        else:
+            self.logger.info("removing symbolic link {}".format(entry))
+            os.remove(entry)
+
+    def remove_file(self, entry):
+        if self.dry_run:
+            self.logger.warning("DRY-RUN> removing file {}".format(entry))
+        else:
+            self.logger.info("removing file {}".format(entry))
+            os.remove(entry)
+            
 def main():
     common_parser = argparse.ArgumentParser(add_help=False)
 
@@ -319,21 +324,21 @@ def main():
         dest="st_time_attribute",
         action="store_const",
         const="st_ctime",
-        default=DEFAULT_TIME_ATTRIBUTE,
+        default=HouseKeeper.DEFAULT_TIME_ATTRIBUTE,
         help="use inode change time")
    
     time_group.add_argument("--mtime",
         dest="st_time_attribute",
         action="store_const",
         const="st_mtime",
-        default=DEFAULT_TIME_ATTRIBUTE,
+        default=HouseKeeper.DEFAULT_TIME_ATTRIBUTE,
         help="use file modification time")
    
     time_group.add_argument("--atime",
         dest="st_time_attribute",
         action="store_const",
         const="st_atime",
-        default=DEFAULT_TIME_ATTRIBUTE,
+        default=HouseKeeper.DEFAULT_TIME_ATTRIBUTE,
         help="use file access time")
    
     mode_group = common_parser.add_mutually_exclusive_group(required=False)
@@ -341,82 +346,65 @@ def main():
     mode_group.add_argument("--interactive", "-i",
         dest="mode",
         action="store_const",
-        const=MODE_INTERACTIVE,
-        default=DEFAULT_MODE,
+        const=HouseKeeper.MODE_INTERACTIVE,
+        default=HouseKeeper.DEFAULT_MODE,
         help="interactive (ask before deleting)")
 
     mode_group.add_argument("--force", "-f",
         dest="mode",
         action="store_const",
-        const=MODE_FORCE,
-        default=DEFAULT_MODE,
+        const=HouseKeeper.MODE_FORCE,
+        default=HouseKeeper.DEFAULT_MODE,
         help="force (delete files without asking)")
 
     parser = argparse.ArgumentParser(parents=[common_parser])
 
-    input_group = parser.add_mutually_exclusive_group()
-
-    input_group.add_argument("--config", "-c", 
+    parser.add_argument("--config", "-c", 
         type=str,
         metavar="C",
         default=None,
         help="config filename")
 
-    input_group.add_argument("--pattern", "-p",
+    parser.add_argument("--pattern", "-p",
         dest="patterns",
         action="append",
+        nargs=2,
+        type=str,
         default=[],
         help="add pattern")
 
-    date_group = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("--remove-dirs",
+        dest="remove_dirs",
+        action="store_true",
+        default=True,
+        help="remove directories")
+    parser.add_argument("--ignore-dirs",
+        dest="remove_dirs",
+        action="store_false",
+        default=True,
+        help="do not remove directories")
 
-    date_group.add_argument("--years-ago", "-Y",
-        dest="ref_date",
-        metavar="Y",
-        type=_years_ago,
-        help="remove files older than Y years")
+    parser.add_argument("--remove-links",
+        dest="remove_links",
+        action="store_true",
+        default=True,
+        help="remove links")
+    parser.add_argument("--ignore-links",
+        dest="remove_links",
+        action="store_false",
+        default=True,
+        help="do not remove links")
 
-    date_group.add_argument("--months-ago", "-M",
-        dest="ref_date",
-        metavar="M",
-        type=_months_ago,
-        help="remove files older than M months")
-
-    date_group.add_argument("--weeks-ago", "-W",
-        dest="ref_date",
-        metavar="W",
-        type=_weeks_ago,
-        help="remove files older than W weeks")
-
-    date_group.add_argument("--days-ago", "-D",
-        dest="ref_date",
-        metavar="D",
-        type=_days_ago,
-        help="remove files older than D days")
-
-    date_group.add_argument("--hours-ago", "-H",
-        dest="ref_date",
-        metavar="H",
-        type=_hours_ago,
-        help="remove files older than H hours")
-
-    date_group.add_argument("--minutes-ago", "-m",
-        dest="ref_date",
-        metavar="M",
-        type=_minutes_ago,
-        help="remove files older than M minutes")
-
-    date_group.add_argument("--seconds-ago", "-s",
-        dest="ref_date",
-        metavar="S",
-        type=_seconds_ago,
-        help="remove files older than S seconds")
-
-    date_group.add_argument("--ref-date", "-R",
-        dest="ref_date",
-        metavar="RD",
-        type=_date,
-        help="remove files older than reference date RD")
+    parser.add_argument("--remove-files",
+        dest="remove_files",
+        action="store_true",
+        default=True,
+        help="remove files")
+    parser.add_argument("--ignore-files",
+        dest="remove_files",
+        action="store_false",
+        default=True,
+        help="do not remove files")
 
     args = parser.parse_args()
 
@@ -433,27 +421,17 @@ def main():
     logger.setLevel(log_level)
     handler.setLevel(log_level)
 
-    global TIME_ATTRIBUTE
-    TIME_ATTRIBUTE = args.st_time_attribute
-
-    global MODE
-    MODE = args.mode
-
-    global DRY_RUN
-    DRY_RUN = args.dry_run
-
+    housekeeper = HouseKeeper(logger=logger, dry_run=args.dry_run, mode=args.mode, time_attribute=args.st_time_attribute)
     if args.config:
         config = configparser.ConfigParser()
         config.read(args.config)
         for key, val in config.items():
             print(key, repr(val), type(val))
         print(config)
-
     elif args.patterns:
-        if args.ref_date is None:
-            logger.error("ERR: reference date not specified")
-            sys.exit(1)
-        apply_patterns(logger, args.ref_date, *args.patterns)
+        for pattern, ref_date in args.patterns:
+            housekeeper.clean(pattern, ref_date, remove_dirs=args.remove_dirs, remove_links=args.remove_links, remove_files=args.remove_files)
+            #apply_patterns(logger, args.ref_date, *args.patterns)
 
 
 if __name__ == "__main__":
