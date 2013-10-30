@@ -449,6 +449,8 @@ def main():
             config = HKConfig()
             config.read(args.config)
             for pattern, pattern_data in config.items():
+                if not os.path.isabs(pattern):
+                    pattern = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(args.config)), pattern))
                 ref_date = pattern_data['ref_date']
                 remove_dirs = _bool(pattern_data['remove_dirs'])
                 remove_links = _bool(pattern_data['remove_links'])
