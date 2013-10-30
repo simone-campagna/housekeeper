@@ -18,6 +18,7 @@
 __author__ = "Simone Campagna"
 
 import os
+import re
 import sys
 import glob
 import time
@@ -243,6 +244,56 @@ def apply_patterns(logger, ref_date, *patterns):
                     entry_remover(entry, logger, DRY_RUN)
             else:
                 logger.debug("skipping young {} {}".format(entry_type, entry))
+
+class HouseKeeper(object):
+    TIME_FORMATS = ("%Y%m%d %H:%M:%S", "%Y%m%d")
+    RE_SEP = re.compile('[:,\s]*')
+    UNIT_ALIASES = {
+        'year': ('Y', 'y', 'years'),
+        'month': ('M', 'months'),
+        'week': ('W', 'w', 'weeks'),
+        'day': ('D', 'd', 'days'),
+        'hour': ('H', 'h', 'hours'),
+        'minute': ('m', 'minutes'),
+        'second': ('s', 'seconds'),
+    }
+    RE_TOKEN = re.compile('(\d+)\s*(Y|year|years|M|month|months|W|w|week|weeks|D|d|day|days|m|minute|minutes|s|second|seconds)')
+    def __init__(self, logger, *, mode=MODE_INTERACTIVE, dry_run=False):
+        self.logger = logger
+        self.mode = mode
+        self.dry_run = dry_run
+        self._visited = set()
+
+    @classmethod
+    def _make_datetime(cls, ref_date_s):
+        # absolute datetime
+        for fmt in cls.TIME_FORMATS:
+            try:
+                return datetime.datetime.strptime(ref_date_s, fmt)
+            except ValueError:
+                pass
+        # relative datetime
+        s = ref_date_s
+        tokens = []
+        while True:
+            m_sep = cls.RE_SEP.match(s)
+            if m_sep:
+                b, e = m_sep.span()
+                s = s[e + 1:]
+            m_token = cls.RE_TOKEN.match(s)
+            if m_token:
+                b, e = m_token.span()
+                s = s[e + 1:]
+                tokens.append(m_token.groups())
+        for m in cls.RE_SPLIT.finditer(ref_date_s):
+            num, unit = m.groups()
+            if
+        return None
+
+    def clean(self, pattern, ref_date):
+        if isinstance(ref_date, str):
+ 
+            raise ValueError("invalid value {}: not a date")
 
 def main():
     common_parser = argparse.ArgumentParser(add_help=False)
