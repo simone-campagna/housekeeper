@@ -276,7 +276,7 @@ class HouseKeeper(metaclass=MetaHouseKeeper):
 
     def clean(self, *selections):
         for selection in selections:
-            self.logger.info("pattern={pattern!r}, ref_time={ref_time!r}, remove_dirs={s.remove_dirs!r}, remove_links={s.remove_links!r}, remove_files={s.remove_files!r}, follow_symlinks={s.follow_symlinks!r}, revert={s.revert!r}".format(
+            self.logger.info("### pattern={pattern!r}, ref_time={ref_time!r}, remove_dirs={s.remove_dirs!r}, remove_links={s.remove_links!r}, remove_files={s.remove_files!r}, follow_symlinks={s.follow_symlinks!r}, revert={s.revert!r}".format(
                 pattern=selection.pattern,
                 ref_time=selection.ref_time.strftime(self.TIME_FORMAT),
                 s=selection))
@@ -572,10 +572,16 @@ def main():
         default=False,
         help="clean also files pointed to by symbolic links")
 
+    parser.add_argument("--report", "-R",
+        dest="report_filename",
+        metavar="F",
+        default=None,
+        help="repot filename")
+
     args = parser.parse_args()
 
     logger = logging.getLogger("CLEAN_DIRS")
-    handler = logging.StreamHandler()
+    stream_handler = logging.StreamHandler()
     log_level = logging.WARNING
     if args.debug:
         log_level = logging.DEBUG
@@ -583,9 +589,16 @@ def main():
         log_level = logging.INFO
     else:
         log_level = logging.WARNING
-    logger.addHandler(handler)
+    logger.addHandler(stream_handler)
     logger.setLevel(log_level)
-    handler.setLevel(log_level)
+    stream_handler.setLevel(logging.DEBUG)
+
+    if args.report_filename:
+        file_handler = logging.FileHandler(args.report_filename)
+        file_formatter = logging.Formatter("%(asctime)s %(message)s")
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+        file_handler.setLevel(logging.INFO)
 
     g_options = {}
     for o in 'remove_dirs', 'remove_links', 'remove_files', 'follow_symlinks', 'revert':
