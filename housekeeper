@@ -159,7 +159,25 @@ class EntryList(set):
 
     def __repr__(self):
         return "{}(list_file={!r}, {})".format(self.__class__.__name__, self.list_file, super().__repr__())
-class HouseKeeper(object):
+
+class MetaHouseKeeper(type):
+    def __new__(mcls, class_name, class_bases, class_dict):
+        cls = super().__new__(mcls, class_name, class_bases, class_dict)
+        unit_aliases = []
+        cls.UNIT_DICT = {}
+        for unit, aliases in cls.UNIT_ALIASES.items():
+            unit_aliases.append(unit)
+            unit_aliases.extend(aliases)
+            cls.UNIT_DICT[unit] = unit
+            for alias in aliases:
+                cls.UNIT_DICT[alias] = unit
+        unit_aliases.sort(key=lambda x: len(x), reverse=True)
+        #print('([+-]?[1-9]\d+|[+-]?0)\s*({})'.format('|'.join(unit_aliases)))
+        cls.RE_TOKEN = re.compile('([+-]?[1-9]\d*|[+-]?0)\s*({})'.format('|'.join(unit_aliases)))
+        cls.RE_SEP = re.compile('[,\s]*')
+        return cls
+
+class HouseKeeper(metaclass=MetaHouseKeeper):
     MODE_INTERACTIVE = 'interactive'
     MODE_FORCE = 'force'
     MODES = (MODE_FORCE, MODE_INTERACTIVE)
@@ -169,16 +187,16 @@ class HouseKeeper(object):
     TIME_FORMAT = "%Y%m%d %H:%M:%S"
     TIME_FORMATS = (TIME_FORMAT, "%Y%m%d")
     UNIT_ALIASES = {
-        'year': ('Y', 'y', 'years'),
-        'month': ('M', 'months'),
-        'week': ('W', 'w', 'weeks'),
-        'day': ('D', 'd', 'days'),
-        'hour': ('H', 'h', 'hours'),
-        'minute': ('m', 'minutes'),
-        'second': ('s', 'seconds'),
+        'year': ('years', ),
+        'month': ('months', ),
+        'week': ('weeks', ),
+        'day': ('days', ),
+        'hour': ('hours', ),
+        'minute': ('minutes', ),
+        'second': ('seconds', ),
     }
     NOW = datetime.datetime.now()
-    HOUSEKEEPER_LIST = ".housekeeper.list"
+    HOUSEKEEPER_LIST = ".housekeeper"
     def __init__(self, logger, *, mode=DEFAULT_MODE, dry_run=False, time_attribute):
         self.logger = logger
         self.mode = mode
@@ -186,39 +204,31 @@ class HouseKeeper(object):
         self.time_attribute = time_attribute
         self.ask_clean = Ask()
         self._visited = set()
-        self._re_sep = re.compile('[:,\s]*')
-        unit_aliases = []
-        self._unit_dict = {}
-        for unit, aliases in self.UNIT_ALIASES.items():
-            unit_aliases.append(unit)
-            unit_aliases.extend(aliases)
-            self._unit_dict[unit] = unit
-            for alias in aliases:
-                self._unit_dict[alias] = unit
-        unit_aliases.sort(key=lambda x: len(x), reverse=True)
-        #print('([+-]?[1-9]\d+|[+-]?0)\s*({})'.format('|'.join(unit_aliases)))
-        self._re_token = re.compile('([+-]?[1-9]\d*|[+-]?0)\s*({})'.format('|'.join(unit_aliases)))
         self._list_dirs = {}
 
-    def _make_datetime(self, ref_date_s):
+    @classmethod
+    def make_ref_time(cls, ref_time_s):
+        # zero
+        if ref_time_s.strip() == "0":
+            return cls.NOW
         # absolute datetime
-        for fmt in self.TIME_FORMATS:
+        for fmt in cls.TIME_FORMATS:
             try:
-                return datetime.datetime.strptime(ref_date_s, fmt)
+                return datetime.datetime.strptime(ref_time_s, fmt)
             except ValueError:
                 pass
         # relative datetime
-        s = ref_date_s
+        s = ref_time_s
         tokens = []
         offset = 0
         while s:
-            m_sep = self._re_sep.match(s)
+            m_sep = cls.RE_SEP.match(s)
             #print("sep: <{}> -> {}".format(s, m_sep))
             if m_sep:
                 b, e = m_sep.span()
                 s = s[e:]
                 offset += e
-            m_token = self._re_token.match(s)
+            m_token = cls.RE_TOKEN.match(s)
             #print("token: <{}> -> {}".format(s, m_token))
             if m_token:
                 b, e = m_token.span()
@@ -226,17 +236,17 @@ class HouseKeeper(object):
                 offset += e
                 tokens.append(m_token.groups())
             else:
-                raise ValueError("invalid ref_date {!r}: unparsed token {!r}".format(ref_date_s, ref_date_s[offset:]))
+                raise ValueError("invalid ref_time {!r}: unparsed token {!r}".format(ref_time_s, ref_time_s[offset:]))
         tdelta = TDelta()
         for num, unit in tokens:
             num = int(num)
-            unit = self._unit_dict[unit]
+            unit = cls.UNIT_DICT[unit]
             if unit == 'year':
                 tdelta.year += num
             elif unit == 'month':
                 tdelta.month += num
             elif unit == 'week':
-                tdelta.week += num
+                tdelta.day += 7 * num
             elif unit == 'day':
                 tdelta.day += num
             elif unit == 'hour':
@@ -247,11 +257,11 @@ class HouseKeeper(object):
                 tdelta.second += num
             else:
                 raise ValueError("invalid unit {}".format(unit))
-        return self.NOW - tdelta
+        return cls.NOW - tdelta
 
-    def clean(self, pattern, ref_date, *, remove_dirs=True, remove_links=True, remove_files=True):
-        if not isinstance(ref_date, datetime.datetime):
-            ref_date = self._make_datetime(ref_date)
+    def clean(self, pattern, ref_time, *, remove_dirs=True, remove_links=True, remove_files=True):
+        if not isinstance(ref_time, datetime.datetime):
+            ref_time = self.make_ref_time(ref_time)
         for entry in glob.glob(pattern):
             entry = os.path.normpath(os.path.abspath(entry))
             if entry in self._visited:
@@ -311,8 +321,8 @@ class HouseKeeper(object):
                     must_remove = False    
                     self.logger.debug("skipping {} {} (see {})".format(entry_type, entry, entry_list.list_file))
                     continue
-            self.logger.debug("{} {}, {}={!r}, ref_time={!r}".format(entry_type, entry, self.time_attribute, entry_date.strftime(self.TIME_FORMAT), ref_date.strftime(self.TIME_FORMAT)))
-            if entry_date < ref_date:
+            self.logger.debug("{} {}, {}={!r}, ref_time={!r}".format(entry_type, entry, self.time_attribute, entry_date.strftime(self.TIME_FORMAT), ref_time.strftime(self.TIME_FORMAT)))
+            if entry_date < ref_time:
                 if self.must_remove("{} {}".format(entry_type, entry), self.mode):
                     entry_remover(entry)
             else:
@@ -351,7 +361,7 @@ class HouseKeeperConfig(configparser.ConfigParser):
     def __init__(self):
         super().__init__()
         self['DEFAULT'] = {
-            'ref_date': '',
+            'ref_time': '',
             'remove_dirs': 'True',
             'remove_links': 'True',
             'remove_files': 'True',
@@ -369,6 +379,17 @@ def _bool(bool_string):
         except ValueError:
             raise ValueError("invalid boolean value {!r}".format(bool_string))
 def main():
+    def pattern_type(s):
+        if not ':' in s:
+            raise ValueError("invalid value {!r}: must be <pattern>:<reference time>")
+        pattern, ref_time_s = s.rsplit(':', 1)
+        try:
+            ref_time = HouseKeeper.make_ref_time(ref_time_s)
+        except Exception as e:
+            sys.stderr.write("ERR: {}: {}\n".format(e.__class__.__name__, e))
+            raise
+        return pattern, ref_time
+
     common_parser = argparse.ArgumentParser(add_help=False)
 
     common_parser.add_argument("--verbose", "-v",
@@ -381,7 +402,7 @@ def main():
         default=False,
         help="debug mode")
 
-    common_parser.add_argument("--dry-run",
+    common_parser.add_argument("--dry-run", "-D",
         action="store_true",
         default=False,
         help="dry run (do not delete)")
@@ -428,18 +449,19 @@ def main():
     parser = argparse.ArgumentParser(parents=[common_parser])
 
     parser.add_argument("--config", "-c", 
-        type=str,
         metavar="C",
-        default=None,
-        help="config filename")
+        type=str,
+        action="append",
+        default=[],
+        help="add config filename")
 
     parser.add_argument("--pattern", "-p",
+        metavar="P:RT",
         dest="patterns",
         action="append",
-        nargs=2,
-        type=str,
+        type=pattern_type,
         default=[],
-        help="add pattern")
+        help="add pattern and reference time")
 
     parser.add_argument("--remove-dirs",
         dest="remove_dirs",
@@ -497,19 +519,19 @@ def main():
             for pattern, pattern_data in config.items():
                 if not os.path.isabs(pattern):
                     pattern = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(args.config)), pattern))
-                ref_date = pattern_data['ref_date']
+                ref_time = pattern_data['ref_time']
                 remove_dirs = _bool(pattern_data['remove_dirs'])
                 remove_links = _bool(pattern_data['remove_links'])
                 remove_files = _bool(pattern_data['remove_files'])
-                pl.append((pattern, ref_date, remove_dirs, remove_links, remove_files))
+                pl.append((pattern, ref_time, remove_dirs, remove_links, remove_files))
         if args.patterns:
-            for pattern, ref_date in args.patterns:
-                pl.append((pattern, ref_date, args.remove_dirs, args.remove_links, args.remove_files))
-                #apply_patterns(logger, args.ref_date, *args.patterns)
+            for pattern, ref_time in args.patterns:
+                pl.append((pattern, ref_time, args.remove_dirs, args.remove_links, args.remove_files))
+                #apply_patterns(logger, args.ref_time, *args.patterns)
     
         housekeeper = HouseKeeper(logger=logger, dry_run=args.dry_run, mode=args.mode, time_attribute=args.st_time_attribute)
-        for pattern, ref_date, remove_dirs, remove_links, remove_files in pl:
-            housekeeper.clean(pattern, ref_date, remove_dirs=remove_dirs, remove_links=remove_links, remove_files=remove_files)
+        for pattern, ref_time, remove_dirs, remove_links, remove_files in pl:
+            housekeeper.clean(pattern, ref_time, remove_dirs=remove_dirs, remove_links=remove_links, remove_files=remove_files)
     except Exception as e:
         if args.debug:
             import traceback
