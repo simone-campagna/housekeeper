@@ -27,6 +27,7 @@ import logging
 import argparse
 import calendar
 import datetime
+import collections
 import configparser
 
 class Ask(object):
@@ -197,6 +198,20 @@ class HouseKeeper(metaclass=MetaHouseKeeper):
     }
     NOW = datetime.datetime.now()
     HOUSEKEEPER_LIST = ".housekeeper"
+    class Selection(collections.namedtuple('Selection', ('pattern', 'ref_time', 'remove_dirs', 'remove_files', 'remove_links', 'follow_symlinks', 'revert'))):
+        def __new__(cls, pattern, ref_time, *, remove_dirs=True, remove_files=True, remove_links=True, follow_symlinks=False, revert=False):
+            return super().__new__(
+                cls,
+                pattern=pattern,
+                ref_time=ref_time,
+                remove_dirs=remove_dirs,
+                remove_links=remove_links,
+                remove_files=remove_files,
+                follow_symlinks=follow_symlinks,
+                revert=revert,
+            )
+
+
     def __init__(self, logger, *, mode=DEFAULT_MODE, dry_run=False, time_attribute):
         self.logger = logger
         self.mode = mode
@@ -259,34 +274,71 @@ class HouseKeeper(metaclass=MetaHouseKeeper):
                 raise ValueError("invalid unit {}".format(unit))
         return cls.NOW - tdelta
 
-    def clean(self, pattern, ref_time, *, remove_dirs=True, remove_links=True, remove_files=True):
+    def clean(self, *selections):
+        for selection in selections:
+            self.logger.info("pattern={pattern!r}, ref_time={ref_time!r}, remove_dirs={s.remove_dirs!r}, remove_links={s.remove_links!r}, remove_files={s.remove_files!r}, follow_symlinks={s.follow_symlinks!r}, revert={s.revert!r}".format(
+                pattern=selection.pattern,
+                ref_time=selection.ref_time.strftime(self.TIME_FORMAT),
+                s=selection))
+            self.clean_selection(selection)
+       
+    @classmethod
+    def younger_than(cls, entry_time, ref_time):
+        return entry_time >= ref_time
+
+    @classmethod
+    def older_than(cls, entry_time, ref_time):
+        return entry_time < ref_time
+
+    def clean_selection(self, selection):
+        pattern = selection.pattern
+        ref_time = selection.ref_time
+        remove_dirs = selection.remove_dirs
+        remove_links = selection.remove_links
+        remove_files = selection.remove_files
+        follow_symlinks = selection.follow_symlinks
+        revert = selection.revert
+   
+        if revert:
+            mismatch_message = 'old'
+            match_function = self.younger_than
+        else:
+            mismatch_message = 'recent'
+            match_function = self.older_than
+
         if not isinstance(ref_time, datetime.datetime):
             ref_time = self.make_ref_time(ref_time)
         for entry in glob.glob(pattern):
+            if not os.path.lexists(entry):
+                continue
             entry = os.path.normpath(os.path.abspath(entry))
+            if not os.path.lexists(entry):
+                continue
             if entry in self._visited:
                 self.logger.debug("skipping aleady visited entry {}".format(entry))
                 continue
-            entry_stat = os.stat(entry)
+            entry_stat = os.stat(entry, follow_symlinks=False) # get stats of the link
             entry_seconds = getattr(entry_stat, self.time_attribute)
-            entry_date = datetime.datetime(*time.localtime(entry_seconds)[:6])
+            entry_time = datetime.datetime(*time.localtime(entry_seconds)[:6])
             entry_type = None
             entry_remover = None
             must_remove = True
             list_dirs = []
-            if os.path.isdir(entry):
+            entry_is_link = False
+            if os.path.islink(entry):
+                # link
+                entry_type = 'symbolic link'
+                entry_remover = self.remove_link
+                if not remove_links:
+                    must_remove = False
+                entry_is_link = True
+            elif os.path.isdir(entry):
                 # dir
                 entry_type = 'directory'
                 entry_remover = self.remove_dir
                 if not remove_dirs:
                     must_remove = False
                 list_dirs.append(entry)
-            elif os.path.islink(entry):
-                # link
-                entry_type = 'symbolic link'
-                entry_remover = self.remove_link
-                if not remove_links:
-                    must_remove = False
             elif os.path.isfile(entry):
                 # file
                 entry_type = 'file'
@@ -321,12 +373,24 @@ class HouseKeeper(metaclass=MetaHouseKeeper):
                     must_remove = False    
                     self.logger.debug("skipping {} {} (see {})".format(entry_type, entry, entry_list.list_file))
                     continue
-            self.logger.debug("{} {}, {}={!r}, ref_time={!r}".format(entry_type, entry, self.time_attribute, entry_date.strftime(self.TIME_FORMAT), ref_time.strftime(self.TIME_FORMAT)))
-            if entry_date < ref_time:
+            if match_function(entry_time, ref_time):
+                self.logger.info("{time_attribute}={entry_time!r} ref_time={ref_time!r}: removing {entry_type:13} {entry!r}".format(
+                    pattern=pattern,
+                    entry_type=entry_type,
+                    entry=entry,
+                    time_attribute=self.time_attribute,
+                    entry_time=entry_time.strftime(self.TIME_FORMAT),
+                    ref_time=ref_time.strftime(self.TIME_FORMAT)))
                 if self.must_remove("{} {}".format(entry_type, entry), self.mode):
                     entry_remover(entry)
             else:
-                self.logger.debug("skipping young {} {}".format(entry_type, entry))
+                self.logger.debug("skipping {} {} {}".format(mismatch_message, entry_type, entry))
+            if entry_is_link:
+                sub_entry = os.path.realpath(entry)
+                if sub_entry != entry:
+                    self.logger.debug("following symbolic link {} -> {}".format(entry, sub_entry))
+                    sub_selection = selection._replace(pattern=sub_entry)
+                    self.clean_selection(sub_selection)
         
     def must_remove(self, message, mode):
         if mode == self.MODE_INTERACTIVE:
@@ -365,6 +429,8 @@ class HouseKeeperConfig(configparser.ConfigParser):
             'remove_dirs': 'True',
             'remove_links': 'True',
             'remove_files': 'True',
+            'follow_symlinks': 'False',
+            'revert': 'False',
         }
 
 def _bool(bool_string):
@@ -496,6 +562,16 @@ def main():
         default=True,
         help="do not remove files")
 
+    parser.add_argument("--revert", "-r",
+        action="store_true",
+        default=False,
+        help="revert (delete files younger than ref_time)")
+
+    parser.add_argument("--follow-symlinks", "-l",
+        action="store_true",
+        default=False,
+        help="clean also files pointed to by symbolic links")
+
     args = parser.parse_args()
 
     logger = logging.getLogger("CLEAN_DIRS")
@@ -511,27 +587,30 @@ def main():
     logger.setLevel(log_level)
     handler.setLevel(log_level)
 
+    g_options = {}
+    for o in 'remove_dirs', 'remove_links', 'remove_files', 'follow_symlinks', 'revert':
+        g_options[o] = getattr(args, o)
+
     try:
-        pl = []
+        selections = []
         if args.config:
             config = HouseKeeperConfig()
             config.read(args.config)
             for pattern, pattern_data in config.items():
                 if not os.path.isabs(pattern):
                     pattern = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(args.config)), pattern))
-                ref_time = pattern_data['ref_time']
-                remove_dirs = _bool(pattern_data['remove_dirs'])
-                remove_links = _bool(pattern_data['remove_links'])
-                remove_files = _bool(pattern_data['remove_files'])
-                pl.append((pattern, ref_time, remove_dirs, remove_links, remove_files))
+                selection = HouseKeeper.Selection(pattern=pattern, ref_time=pattern_data['ref_time'])
+                for field_name in 'remove_dirs', 'remove_links', 'remove_files', 'follow_symlinks', 'revert':
+                    setattr(selection, field_name, _bool(pattern_data[field_name]))
+                selections.append(selection)
         if args.patterns:
             for pattern, ref_time in args.patterns:
-                pl.append((pattern, ref_time, args.remove_dirs, args.remove_links, args.remove_files))
+                selection = HouseKeeper.Selection(pattern=pattern, ref_time=ref_time, **g_options)
+                selections.append(selection)
                 #apply_patterns(logger, args.ref_time, *args.patterns)
     
         housekeeper = HouseKeeper(logger=logger, dry_run=args.dry_run, mode=args.mode, time_attribute=args.st_time_attribute)
-        for pattern, ref_time, remove_dirs, remove_links, remove_files in pl:
-            housekeeper.clean(pattern, ref_time, remove_dirs=remove_dirs, remove_links=remove_links, remove_files=remove_files)
+        housekeeper.clean(*selections)
     except Exception as e:
         if args.debug:
             import traceback
