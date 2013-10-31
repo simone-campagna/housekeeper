@@ -444,6 +444,11 @@ def _bool(bool_string):
             return bool(i)
         except ValueError:
             raise ValueError("invalid boolean value {!r}".format(bool_string))
+
+class HelpFormatter(argparse.RawDescriptionHelpFormatter):
+    def __init__(self, prog, indent_increment=2, max_help_position=30, width=None):
+        super().__init__(prog=prog, indent_increment=indent_increment, max_help_position=max_help_position, width=width)
+
 def main():
     def pattern_type(s):
         if not ':' in s:
@@ -512,7 +517,61 @@ def main():
         default=HouseKeeper.DEFAULT_MODE,
         help="force (delete files without asking)")
 
-    parser = argparse.ArgumentParser(parents=[common_parser])
+    parser = argparse.ArgumentParser(parents=[common_parser],
+        formatter_class=HelpFormatter,
+        description="""
+Housekeeper removes old files/links/directories matching with given
+patterns. Patterns can be specified in a configuration file, or as
+command line option.
+""",
+        epilog="""
+Each pattern has a specific 'ref_time'; only files older than
+'ref_time' will be removed.
+
+Moeover, each pattern has some options:
+ * 'remove_dirs': True by default, specifies if directories must be
+   removed;
+ * 'remove_links': True by default, specifies if symbolc links must be
+   removed;
+ * 'remove_files': True by default, specifies if files must be
+   removed;
+ * 'follow_symlinks': False by default, specifies if symbolic links
+   must be followed;
+ * 'revert': False by default, reverts the selection, so that only
+   files younger than 'ref_time' will be removed.
+
+Each entry is visited only once.
+
+Housekeeper can produce a file report about removed files.
+========
+REF_TIME
+========
+The ref_time can be specified as absolute time or relative time
+(referring to the current time).
+An absolute time can be specified as
+ * '%Y%m%d %H:%M:%S'
+ * '%Y%m%d'
+For instance, '20131031 12:00:00'
+
+A relative time can be specified as a list of increments, for instance
+'1 day' or '3days 4 hours 10seconds'.
+
+============
+CONFIG_FILES
+============
+An example config file is:
+[TEST/a*]
+    ref_time = 1month
+    remove_dirs = False
+    remove_links = False
+    follow_symlinks = True
+
+[TEST/*]
+    ref_time = 2weeks
+    remove_dirs = False
+    revert = True
+
+""")
 
     parser.add_argument("--config", "-c", 
         metavar="C",
@@ -527,7 +586,7 @@ def main():
         action="append",
         type=pattern_type,
         default=[],
-        help="add pattern and reference time")
+        help="add pattern and reference time (for instance: 'TEST/*:2weeks')")
 
     parser.add_argument("--remove-dirs",
         dest="remove_dirs",
@@ -570,7 +629,7 @@ def main():
     parser.add_argument("--follow-symlinks", "-l",
         action="store_true",
         default=False,
-        help="clean also files pointed to by symbolic links")
+        help="apply also to entries pointed to by symbolic links")
 
     parser.add_argument("--report", "-R",
         dest="report_filename",
